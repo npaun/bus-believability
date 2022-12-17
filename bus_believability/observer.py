@@ -1,11 +1,12 @@
 #!/usr/bin/env pypy3
-import urllib.request
-import gtfs_realtime_pb2 as rt
+from . import gtfs_realtime_pb2 as rt
 import time
 import dataclasses
 from dataclasses import dataclass
 import pprint
 import sqlite3
+import sys
+import requests
 
 
 VEHICLE_UPDATES_URL='https://bct.tmix.se/gtfs-realtime/vehicleupdates.pb?operatorIds=20'
@@ -48,35 +49,44 @@ class VehicleState:
 
 
 
-def update_vehicle_positions(gtfs, con, url=VEHICLE_UPDATES_URL):
-    with urllib.request.urlopen(url) as res:
-        cur = con.cursor()
-        vp = rt.FeedMessage()
-        vp.ParseFromString(res.read())
-        for entity in vp.entity:
-            vehicle = entity.vehicle
-            vs = VehicleState(
-                    start_date=int(vehicle.trip.start_date) if vehicle.trip.start_date else None,
-                    trip_id=vehicle.trip.trip_id,
-                    route_id=vehicle.trip.route_id,
-                    direction_id=vehicle.trip.direction_id,
-                    lat=vehicle.position.latitude,
-                    lon=vehicle.position.longitude,
-                    speed=3.6*vehicle.position.speed,
-                    stop_sequence=vehicle.current_stop_sequence,
-                    stop_id=vehicle.stop_id,
-                    vehicle_id=vehicle.vehicle.id[-4:],
-                    vehicle_status=vehicle.current_status,
-                    observed_at=int(time.time())
-            )
+def update_vehicle_positions(sess, con, url=VEHICLE_UPDATES_URL):
+    res = sess.get(url)
+    cur = con.cursor()
+    vp = rt.FeedMessage()
+    vp.ParseFromString(res.content)
+    vehicles_observed = set()
+    for entity in vp.entity:
+        vehicle = entity.vehicle
+        vs = VehicleState(
+                start_date=int(vehicle.trip.start_date) if vehicle.trip.start_date else None,
+                trip_id=vehicle.trip.trip_id,
+                route_id=vehicle.trip.route_id,
+                direction_id=vehicle.trip.direction_id,
+                lat=vehicle.position.latitude,
+                lon=vehicle.position.longitude,
+                speed=3.6*vehicle.position.speed,
+                stop_sequence=vehicle.current_stop_sequence,
+                stop_id=vehicle.stop_id,
+                vehicle_id=vehicle.vehicle.id[-4:],
+                vehicle_status=vehicle.current_status,
+                observed_at=int(time.time())
+        )
+        vehicles_observed.add(vs.vehicle_id)
+        cur.execute(f"INSERT INTO vehicle_updates VALUES {vs.asplaceholder()} ON CONFLICT (start_date,trip_id,stop_sequence) DO UPDATE SET lat=excluded.lat, lon=excluded.lon, speed=excluded.speed, vehicle_status=excluded.vehicle_status, observed_at=excluded.observed_at;", vs.astuple())
+        con.commit()
 
-            cur.execute(f"INSERT INTO vehicle_updates VALUES {vs.asplaceholder()} ON CONFLICT (start_date,trip_id,stop_sequence) DO UPDATE SET lat=excluded.lat, lon=excluded.lon, speed=excluded.speed, vehicle_status=excluded.vehicle_status, observed_at=excluded.observed_at;", vs.astuple())
-            con.commit()
+    print(f'Updated {vehicles_observed}')
+
 
 def main():
-    con = sqlite3.connect("vehicles.db")
+    sess = requests.Session()
+    con = sqlite3.connect(sys.argv[1])
     while True:
-        update_vehicle_positions(con)
+        try:
+            update_vehicle_positions(sess, con)
+        except Exception as exc:
+            print(exc)
+
         time.sleep(15)
 
 
