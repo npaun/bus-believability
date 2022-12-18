@@ -1,51 +1,15 @@
 #!/usr/bin/env pypy3
 from . import gtfs_realtime_pb2 as rt
 import time
-import dataclasses
-from dataclasses import dataclass
+import datetime
 import pprint
 import sqlite3
 import sys
 import requests
+from .schema import *
 
 
 VEHICLE_UPDATES_URL='https://bct.tmix.se/gtfs-realtime/vehicleupdates.pb?operatorIds=20'
-
-
-@dataclass
-class VehicleState:
-    # Identify trip
-    start_date: str
-    trip_id: str
-
-    # Redundant with trip but useful for some cases
-    route_id: str
-    direction_id: int
-
-    #  Position
-    lat: float
-    lon: float
-    speed: float # km/h
-
-    # Current heading
-    stop_sequence: int
-    stop_id: str
-
-    # Vehicle
-    vehicle_id: str
-    vehicle_status: int
-
-    # Observation
-    observed_at: int
-
-    def astuple(self):
-        return dataclasses.astuple(self)
-
-    @classmethod
-    def asplaceholder(cls):
-        n_fields = len(dataclasses.fields(cls))
-        placeholders = ','.join('?'*n_fields)
-        return f'({placeholders})'
 
 
 
@@ -79,6 +43,8 @@ def update_vehicle_positions(sess, con, url=VEHICLE_UPDATES_URL):
 
 
 def main():
+    print('Started @', datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+
     sess = requests.Session()
     con = sqlite3.connect(sys.argv[1])
     while True:
@@ -87,7 +53,7 @@ def main():
         except Exception as exc:
             print(exc)
 
-        time.sleep(15)
+        time.sleep(20)
 
 
 if __name__ == '__main__':
