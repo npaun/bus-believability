@@ -4,12 +4,15 @@ import time
 import datetime
 import pprint
 import sqlite3
-import sys
 import requests
+import argparse
+import subprocess
+from pathlib import Path
 from .schema import *
 
 
 VEHICLE_UPDATES_URL='https://bct.tmix.se/gtfs-realtime/vehicleupdates.pb?operatorIds=20'
+ROOT = Path(__file__).parent.parent
 
 
 
@@ -43,10 +46,32 @@ def update_vehicle_positions(sess, con, url=VEHICLE_UPDATES_URL):
 
 
 def main():
+    cmd = argparse.ArgumentParser()
+    cmd.add_argument('--dir', help='Directory to write database files', type=Path)
+    cmd.add_argument('--bucket', help='Bucket for archived database files')
+    args = cmd.parse_args()
+
+    sync_data(args.dir, args.bucket)
+    db_file = args.dir / f"{datetime.datetime.now().strftime('%Y%m%d')}.db"
+    con = sqlite3.connect(db_file)
+
+    apply_schema(con)
+    loop(con)
+
+def sync_data(db_dir, bucket_url):
+    print('Archiving data...')
+    subprocess.run(['gsutil', '-m', 'rsync', db_dir, bucket_url]) 
+
+
+def apply_schema(con):
+    with open(Path(__file__).parent / 'schema.sql') as fp:
+        con.execute(fp.read())
+
+
+def loop(con):
     print('Started @', datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
     sess = requests.Session()
-    con = sqlite3.connect(sys.argv[1])
     while True:
         try:
             update_vehicle_positions(sess, con)
