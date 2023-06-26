@@ -44,23 +44,40 @@ class VehicleState:
         return VehicleState(**row_dict)
 
 
-class TripCompletion(Enum):
-    SCHEDULED = 0
-    DEPARTED = 1
-    ARRIVED = 2
-    MISSED = 3
-    BLOCK_IN_SERVICE = 4
-    BLOCK_MISSED = 5
+class TripPrediction(str, Enum):
+    # Scheduled to run; awaiting further information
+    SCHEDULED = "SCHEDULED"
 
-class TripPerformance(Enum):
-    UNKNOWN = 0
-    EARLY = 1
-    ON_TIME = 2
-    LATE = 3
+    # At originating bus stop
+    WAITING = "WAITING"
+
+    # Left originating bus stop
+    DEPARTED = "DEPARTED"
+
+    # Arrived at terminus
+    ARRIVED = "ARRIVED"
+
+    # No information available, should be running 
+    MISSING = "MISSING"
+
+    # Did not operate
+    MISSED = "MISSED"
+
+    # Cancelled by agency
+    CANCELLED = "CANCELLED"
+
+    # An earlier trip operated as scheduled
+    BLOCK_IN_SERVICE = "BLOCK_IN_SERVICE"
+
+    # An earlier trip did not run 
+    BLOCK_MISSED = "BLOCK_MISSED"
+
+    # An earlier trip was cancelled by agency
+    BLOCK_LIKELY_CANCELLED = "BLOCK_LIKELY_CANCELLED"
+
+    # Don't show block-based prediction; live status is best
+    IGNORE_BLOCK = "IGNORE_BLOCK"
 
 
-@dataclass
-class TripStatus:
-    completion: TripCompletion = TripCompletion.SCHEDULED
-    performance: TripPerformance = TripPerformance.UNKNOWN
+
 

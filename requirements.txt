@@ -1,4 +1,3 @@
 protobuf
 requests
-py-gtfs-loader @ git+https://github.com/transitapp/py-gtfs-loader@v0.1.8
 gtfs-blocks-to-transfers @ git+https://github.com/transitapp/gtfs-blocks-to-transfers
