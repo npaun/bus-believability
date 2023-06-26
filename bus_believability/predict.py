@@ -6,11 +6,12 @@ import datetime
 import math
 import json
 from .schema import *
+from typing import Optional
 from dataclasses import dataclass
+from functools import cached_property
 from blocks_to_transfers.service_days import ServiceDays
 import pprint
 
-NOW = datetime.datetime.now()
 MISSING_THRESHOLD = 360 # Mark as missing if more than 6 minutes late
 VEHICLE_STATUS_STR = ["INCOMING_AT", "STOPPED_AT", "IN_TRANSIT_TO"]
 
@@ -23,157 +24,190 @@ def main():
     cmd.add_argument('--date', help='Service date in yyyymmdd format', default=today)
 
     args = cmd.parse_args()
+    predictor = Predictor(args.gtfs, args.db, datetime.datetime.strptime(args.date, '%Y%m%d'))
+    predictor.update() 
+    print(json.dumps(predictor.get_departures('20', '1', 'ffff'), indent=2))
 
-    gtfs = gtfs_loader.load(args.gtfs)
-    con = sqlite3.connect(args.db)
-    con.row_factory = VehicleState.fromsql
+class Predictor:
+    def __init__(self, gtfs_path, db_path, service_date):
+        self.gtfs = gtfs_loader.load(gtfs_path)
+        self.con = sqlite3.connect(db_path)
+        self.con.row_factory = VehicleState.fromsql
+        self.service_date = service_date
+        self.results = {}
 
-    results = process(gtfs, con, args.date)
-    print(json.dumps(results, indent=2))
+    @cached_property
+    def active_services(self):
+        service_days = ServiceDays(self.gtfs)
+        today_index = (self.service_date - service_days.epoch).days
+        return {service_id for service_id, days 
+                in service_days.days_by_service.items() if days[today_index]}
 
+    @cached_property
+    def trips_by_block(self):
+        trips_by_block = {}
+        for trip in sorted(self.gtfs.trips.values(), key=lambda trip: trip.first_departure):
+            if trip.service_id not in self.active_services:
+                continue
 
-def process(gtfs, con, raw_service_date):
-    trip_observations = get_observations(con, raw_service_date)
-    service_date = datetime.datetime.strptime(raw_service_date, '%Y%m%d')
-    active_services = get_active_services(gtfs, service_date)
-    return get_predictions(gtfs, trip_observations, service_date, active_services)
+            trips_by_block.setdefault(trip.block_id, []).append(trip)
 
-def get_active_services(gtfs, service_date):
-    service_days = ServiceDays(gtfs)
-    today_index = (service_date - service_days.epoch).days
-    return {service_id for service_id, days in service_days.days_by_service.items() if days[today_index]}
-
-
-def get_expected_start(service_date, trip):
-    return service_date + datetime.timedelta(seconds=trip.first_departure)
-
-def get_trips_by_block(gtfs, active_services):
-    trips_by_block = {}
-    for trip in sorted(gtfs.trips.values(), key=lambda trip: trip.first_departure):
-        if trip.service_id not in active_services:
-            continue
-
-        trips_by_block.setdefault(trip.block_id, []).append(trip)
-
-    return trips_by_block
+        return trips_by_block
 
 
+    @cached_property
+    def trips_by_route_direction(self):
+        trips_by_route = {}
+        for trip in sorted(self.gtfs.trips.values(), key=lambda trip: trip.first_departure):
+            if trip.service_id not in self.active_services:
+                continue
+
+            trips_by_route.setdefault((trip.route.route_short_name, trip.direction_id), []).append(trip)
+
+        return trips_by_route
 
 
-def get_predictions(gtfs, trip_observations, service_date, active_services):
-    all_results = {}
-    trips_by_block = get_trips_by_block(gtfs, active_services)
-    for block_id, trips in trips_by_block.items():
-        block_results = all_results[block_id] = {}
+    def fetch_observations(self):
+        cur = self.con.cursor()
+        trip_observations = {}
+        query = 'SELECT * from vehicle_updates WHERE start_date = ?;'
+        for row in cur.execute(query, (self.service_date.strftime('%Y%m%d'),)):
+            trip_observations.setdefault(row.trip_id, {})[row.stop_sequence] = row
 
-        block_status = TripPrediction.SCHEDULED
-        for trip in trips:
-            observation = trip_observations.get(trip.trip_id, {})
-            if observation:
-                live_status = predict_from_observation(service_date, trip, observation)
-            else:
-                live_status = predict_from_schedule(service_date, trip)
+        return trip_observations
 
+    def update(self):
+        trip_observations = self.fetch_observations()
+        now = datetime.datetime.now()
+        self.results.clear()
 
-            block_status = predict_from_previous_trips(block_status, live_status)
+        for block_id, trips in self.trips_by_block.items():
+            block_status = TripPrediction.SCHEDULED
+            for trip in trips:
+                observations = trip_observations.get(trip.trip_id, {})
+                latest_event = (max(observations.values(), key=lambda event: event.stop_sequence) 
+                                if observations else None)
+                trip_predictor = TripPredictor(trip, self.service_date, latest_event)
+                block_status = self._predict_from_previous_trips(block_status, trip_predictor.live_status)
+                self.results[trip.trip_id] = trip_predictor.get_trip_desc(now, block_status) 
 
-            last_event = max(observation.values(), key=lambda event: event.stop_sequence) if observation else None
+    def get_block(self, block_id):
+        pass
 
-            block_results[trip.trip_id] = dict(
-                live_status=live_status,
-                block_status=block_status,
-                route_short_name=trip.route.route_short_name,
-                trip_headsign=trip.trip_headsign,
-                direction_id=trip.direction_id,
-                scheduled_departure=str(trip.first_departure),
-                scheduled_arrival=str(trip.last_arrival),
-                last_event=describe_last_event(trip, last_event),
-                route_color=trip.route.route_color,
-                route_text_color=trip.route.route_text_color
-            )
+    def get_route_at_stop(self, route_id, stop_id):
+        """
+        0. Find stop near you (find direction)
+            Hwy 6 / Slocan Park Gas Station (saved end 1)
+            Ward / Baker (saved end 2)
+        1. For every trip of this route, find stop offset (wasteful)
+            - can itinerize
+            - find trips after now (not really - want to see the past rrsults)
+        2. Does direction need to be a thing? yes presumably?
+        """
+        pass
 
-    return all_results
+    def get_departures(self, route_id, direction_id, stop_id):
+        return {trip.trip_id: self.results[trip.trip_id] 
+                for trip in self.trips_by_route_direction[(route_id, direction_id)]}
 
-def describe_last_event(trip, last_event):
-    if not last_event:
-        return None   
-    seq_ofs = {st.stop_sequence: i for i, st in enumerate(trip._gtfs.stop_times[trip.trip_id])}
-    expected_ofs = seq_ofs[last_event.stop_sequence]
-    expected_st = trip._gtfs.stop_times[trip.trip_id][expected_ofs]
-    return dict(
-            stop_name=expected_st.stop.stop_name,
-            observed_at=last_event.observed_at,
-            vehicle_status=VEHICLE_STATUS_STR[last_event.vehicle_status],
-            speed=last_event.speed,
-            vehicle_id=last_event.vehicle_id
-            )
+    def _predict_from_previous_trips(self, block_status, live_status):
+        if live_status in {TripPrediction.DEPARTED, TripPrediction.ARRIVED}:
+            return TripPrediction.BLOCK_IN_SERVICE
+        elif live_status in {TripPrediction.MISSED, TripPrediction.MISSING}:
+            return TripPrediction.BLOCK_MISSED
+        else:
+            return block_status
 
+@dataclass
+class TripPredictor:
+    trip: any
+    service_date: datetime.date
+    latest_event: Optional[VehicleState]
 
-    
+    @cached_property
+    def scheduled_end(self):
+        return self.service_date + datetime.timedelta(seconds=self.trip.last_arrival)
 
-def predict_from_schedule(service_date, trip):
-    expected_start = get_expected_start(service_date, trip)
-    delay = (NOW - expected_start).total_seconds()
-    if delay < MISSING_THRESHOLD:
-        return TripPrediction.SCHEDULED
-    elif NOW > service_date + datetime.timedelta(seconds=trip.last_arrival):
+    @cached_property
+    def scheduled_start(self):
+        return self.service_date + datetime.timedelta(seconds=self.trip.first_departure)
+
+    def status(self, now):
+        return self.live_status(now) if self.latest_event else self.scheduled_status(now)
+
+    def scheduled_status(self, now):
+        delay = (now - self.scheduled_start).total_seconds()
+        if delay < MISSING_THRESHOLD:
+            return TripPrediction.SCHEDULED
+        elif now > self.scheduled_end:
+            return TripPrediction.MISSED
+
         return TripPrediction.MISSED
-    else:
-        return TripPrediction.MISSING
 
+    def live_status(self, now): 
+        start_seq = self.trip.first_stop_time.stop_sequence
+        end_seq = self.trip.last_stop_time.stop_sequence
 
-def predict_from_observation(service_date, trip, observation):
-    start_seq = trip.first_stop_time.stop_sequence
-    end_seq = trip.last_stop_time.stop_sequence
-    last_event = max(observation.values(), key=lambda event: event.stop_sequence)
+        if self.latest_event.stop_sequence == end_seq and self.latest_event.vehicle_status in {0, 1}:
+            # At the end of the journey for sure
+            return TripPrediction.ARRIVED
 
-    if last_event.stop_sequence == end_seq and last_event.vehicle_status in {0, 1}:
-        # At the end of the journey for sure
-        return TripPrediction.ARRIVED
+        # Due to refresh rates we might not have an event for the last stop,
+        # so figure out if the trip would've ended based on the last observation
+        # we do have
+        if now > self.live_end:
+            return TripPrediction.ARRIVED
 
-    # Due to refresh rates we might not have an event for the last stop,
-    # so figure out if the trip would've ended based on the last observation
-    # we do have
-    if NOW > get_predicted_end(service_date, trip, last_event):
-        return TripPrediction.ARRIVED
+        if self.latest_event.stop_sequence == start_seq and self.latest_event.vehicle_status == 1:
+            return TripPrediction.WAITING
 
-    if last_event.stop_sequence == start_seq and last_event.vehicle_status == 1:
-        return TripPrediction.WAITING
+        return TripPrediction.DEPARTED
 
-    return TripPrediction.DEPARTED
+    def get_latest_event_desc(self):
+        if not self.latest_event:
+            return None
 
+        return dict(
+                stop_name=self.latest_stop_time.stop.stop_name,
+                observed_at=self.latest_event.observed_at,
+                vehicle_status=VEHICLE_STATUS_STR[self.latest_event.vehicle_status],
+                speed=self.latest_event.speed,
+                vehicle_id=self.latest_event.vehicle_id
+        )
 
-def predict_from_previous_trips(block_status, live_status):
-    if live_status in {TripPrediction.DEPARTED, TripPrediction.ARRIVED}:
-        return TripPrediction.BLOCK_IN_SERVICE
-    elif live_status in {TripPrediction.MISSED, TripPrediction.MISSING}:
-        return TripPrediction.BLOCK_MISSED
-    else:
-        return block_status
+    def get_trip_desc(self, now, block_status):
+        return dict(
+                    live_status=self.status(now),
+                    block_status=block_status,
+                    route_short_name=self.trip.route.route_short_name,
+                    trip_headsign=self.trip.trip_headsign,
+                    direction_id=self.trip.direction_id,
+                    scheduled_departure=str(self.trip.first_departure),
+                    scheduled_arrival=str(self.trip.last_arrival),
+                    latest_event=self.get_latest_event_desc(),
+                    route_color=self.trip.route.route_color,
+                    route_text_color=self.trip.route.route_text_color
+                )
 
+    @cached_property
+    def live_delay(self):
+        next_scheduled = self.service_date + datetime.timedelta(seconds=self.latest_stop_time.arrival_time)
+        observed_at = datetime.datetime.fromtimestamp(self.latest_event.observed_at)
+        delay = (observed_at - next_scheduled).total_seconds()
+        return max(0, delay) # Model isn't very good for early arrivals; would need to look at earlier events
 
-def get_predicted_end(service_date, trip, last_event):
-    seq_ofs = {st.stop_sequence: i for i, st in enumerate(trip._gtfs.stop_times[trip.trip_id])}
-    expected_ofs = seq_ofs[last_event.stop_sequence]
-    expected_st = trip._gtfs.stop_times[trip.trip_id][expected_ofs]
-    expected_arrival = service_date + datetime.timedelta(seconds=expected_st.arrival_time)
-    actual_arrival = datetime.datetime.fromtimestamp(last_event.observed_at)
-    delay = int((actual_arrival - expected_arrival).total_seconds())
-    expected_end = service_date + datetime.timedelta(seconds=delay) + datetime.timedelta(seconds=trip.last_arrival)
-    return expected_end
+    @cached_property
+    def live_end(self):
+        return self.scheduled_end + datetime.timedelta(seconds=self.live_delay)
 
+    @cached_property
+    def stop_times_by_seq(self):
+        return {st.stop_sequence: st 
+                for st in self.trip._gtfs.stop_times[self.trip.trip_id]}
 
-
-def get_observations(con, service_date):
-    cur = con.cursor()
-    trip_observations = {}
-    query = 'SELECT * from vehicle_updates WHERE start_date = ?;'
-    for row in cur.execute(query, (service_date,)):
-        trip_observations.setdefault(row.trip_id, {})[row.stop_sequence] = row
-
-    return trip_observations
-
-
+    @cached_property
+    def latest_stop_time(self):
+        return self.stop_times_by_seq[self.latest_event.stop_sequence]
 
 if __name__ == '__main__':
     main()
