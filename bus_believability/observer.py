@@ -7,6 +7,8 @@ import sqlite3
 import requests
 import argparse
 import subprocess
+from dataclasses import dataclass
+from typing import Optional
 from pathlib import Path
 from .schema import *
 
@@ -50,13 +52,8 @@ def main():
     cmd.add_argument('--dir', help='Directory to write database files', type=Path)
     cmd.add_argument('--bucket', help='Bucket for archived database files')
     args = cmd.parse_args()
-
-    sync_data(args.dir, args.bucket)
-    db_file = args.dir / f"{datetime.datetime.now().strftime('%Y%m%d')}.db"
-    con = sqlite3.connect(db_file)
-
-    apply_schema(con)
-    loop(con)
+    db_rotator = DBRotator(args.dir, args.bucket)
+    loop(db_rotator)
 
 def sync_data(db_dir, bucket_url):
     print('Archiving data...')
@@ -68,17 +65,41 @@ def apply_schema(con):
         con.execute(fp.read())
 
 
-def loop(con):
+@dataclass
+class DBRotator:
+    db_dir: Path
+    bucket_url: str
+    date: Optional[datetime.date] = None
+    con: Optional[sqlite3.Connection] = None
+
+    def connect(self):
+        now = datetime.date.today()
+        if self.date == now:
+            return self.con
+
+        print(f'Rotating database {self.date} -> {now}')
+        self.date = now
+
+        sync_data(self.db_dir, self.bucket_url)
+        db_file = self.db_dir / f"{self.date.strftime('%Y%m%d')}.db"
+        self.con = sqlite3.connect(db_file)
+        apply_schema(self.con)
+        return self.con
+
+
+def loop(db_rotator):
     print('Started @', datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
     sess = requests.Session()
     while True:
         try:
+            con = db_rotator.connect() 
             update_vehicle_positions(sess, con)
         except Exception as exc:
             print(exc)
 
         time.sleep(20)
+
 
 
 if __name__ == '__main__':
