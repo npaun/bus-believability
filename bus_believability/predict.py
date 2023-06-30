@@ -6,6 +6,7 @@ import datetime
 import math
 import json
 from .schema import *
+from . import aggregate
 from typing import Optional
 from dataclasses import dataclass
 from functools import cached_property
@@ -26,11 +27,13 @@ def main():
     args = cmd.parse_args()
     predictor = Predictor(args.gtfs, args.db, datetime.datetime.strptime(args.date, '%Y%m%d'))
     predictor.update() 
-    print(json.dumps(predictor.get_departures('20', '1', 'ffff'), indent=2))
+    print(json.dumps(predictor.get_departures('20', '1', '160376'), indent=2))
 
 class Predictor:
     def __init__(self, gtfs_path, db_path, service_date):
         self.gtfs = gtfs_loader.load(gtfs_path)
+        self.itineraries = aggregate.get_itineraries(self.gtfs)
+        self.stop_index = aggregate.get_stop_index(self.gtfs, self.itineraries)
         self.con = sqlite3.connect(db_path)
         self.con.row_factory = VehicleState.fromsql
         self.service_date = service_date
@@ -91,24 +94,33 @@ class Predictor:
                 block_status = self._predict_from_previous_trips(block_status, trip_predictor.live_status)
                 self.results[trip.trip_id] = trip_predictor.get_trip_desc(now, block_status) 
 
+    def get_all_blocks(self):
+        all_results = {}
+        for block_id, trips in self.trips_by_block.items():
+            block_results = all_results[block_id] = {}
+            for trip in trips:
+                block_results[trip.trip_id] = self.results[trip.trip_id]
+
+        return all_results
+
     def get_block(self, block_id):
         pass
 
-    def get_route_at_stop(self, route_id, stop_id):
-        """
-        0. Find stop near you (find direction)
-            Hwy 6 / Slocan Park Gas Station (saved end 1)
-            Ward / Baker (saved end 2)
-        1. For every trip of this route, find stop offset (wasteful)
-            - can itinerize
-            - find trips after now (not really - want to see the past rrsults)
-        2. Does direction need to be a thing? yes presumably?
-        """
-        pass
-
     def get_departures(self, route_id, direction_id, stop_id):
-        return {trip.trip_id: self.results[trip.trip_id] 
-                for trip in self.trips_by_route_direction[(route_id, direction_id)]}
+        departures = []
+        for loc in self.stop_index[stop_id]:
+            if loc.itin.route != route_id or loc.itin.direction != direction_id:
+                continue
+
+            for trip in self.itineraries[loc.itin]:
+                if result := self.results.get(trip.trip_id):
+                    departures.append(result)
+
+
+        return sorted(departures, key=lambda t: t['scheduled_departure'])
+
+
+
 
     def _predict_from_previous_trips(self, block_status, live_status):
         if live_status in {TripPrediction.DEPARTED, TripPrediction.ARRIVED}:
@@ -186,7 +198,9 @@ class TripPredictor:
                     scheduled_arrival=str(self.trip.last_arrival),
                     latest_event=self.get_latest_event_desc(),
                     route_color=self.trip.route.route_color,
-                    route_text_color=self.trip.route.route_text_color
+                    route_text_color=self.trip.route.route_text_color,
+                    block_id=self.trip.block_id,
+                    trip_id=self.trip.trip_id,
                 )
 
     @cached_property
