@@ -4,7 +4,11 @@ import pprint
 import requests
 from dataclasses import dataclass
 from enum import Enum
+import json
+import datetime
+from gtfs_loader.types import GTFSTime
 
+NOW = datetime.datetime.now()
 ALERT_URL = 'https://www.bctransit.com/sites/REST/controller/ServiceAlert/get-alert-list?micrositeid=1520526315921&timezone=Canada/Pacific'
 
 def fetch_alerts():
@@ -43,6 +47,15 @@ class NamedEntities:
     times: list[NamedTime]
     dates: list[NamedDate]
 
+
+@dataclass
+class Alert:
+    status: str
+    routes: list[str]
+    start_date: str # FIXME: parse it
+    title: str # The raw text
+    entities: NamedEntities
+    alert_id: int
 
 def fake_ner(alert):
     return NamedEntities(
@@ -90,7 +103,6 @@ def extract_date(alert):
             continue
 
         ordinal = OrdinalSeries[ordinal.upper()] if ordinal else OrdinalSeries.Ambiguous
-
         entities.append(NamedDate(
             month=int_month,
             day=int(day),
@@ -99,12 +111,48 @@ def extract_date(alert):
 
     return entities
 
+def parse_alert(alert):
+    return Alert(
+            status=alert['AlertStatus'],
+            routes=alert['Routes'],
+            start_date=alert['StartDateFormatted'],
+            title=alert['Title'],
+            entities=fake_ner(alert['Title']),
+            alert_id=alert['id']
+    )
+
+def resolve_alert(alert):
+    for route in alert.routes:
+        for date in alert.entities.dates:
+            res_date = datetime.date(
+                    year=NOW.year if date.month >= (NOW.month - 1) else NOW.year + 1,
+                    month=date.month,
+                    day=date.day
+            )
+            for time in alert.entities.times:
+                res_times = expand_time(time)
+                for res_time in res_times:
+                    print('Guess', route, res_date, res_time)
+
+
+def expand_time(time):
+    if time.ampm == Meridiem.AM:
+        return [datetime.time(time.hours, time.minutes)]
+    elif time.ampm == Meridiem.PM:
+        return [datetime.time(time.hours + 12 if time.hours != 12 else time.hours, time.minutes)]
+    else:
+        return [datetime.time(time.hours, time.minutes, 0), datetime.time(time.hours + 12, time.minutes, 0)]
+
 
 def parse_alerts():
-    alerts = fetch_alerts()
-    for alert in alerts:
-        pprint.pprint(alert)
-        print(fake_ner(alert['Title']))
+    #alerts = fetch_alerts()
+    with open('alerts.json') as fp:
+        alerts = json.load(fp)
+
+    for raw_alert in alerts:
+        alert = parse_alert(raw_alert)
+        resolve_alert(alert)
+
 
 if __name__ == '__main__':
     parse_alerts()
