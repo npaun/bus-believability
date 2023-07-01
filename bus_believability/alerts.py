@@ -141,7 +141,7 @@ def expand_time(time):
     elif time.ampm == Meridiem.PM:
         return [datetime.time(time.hours + 12 if time.hours != 12 else time.hours, time.minutes)]
     else:
-        return [datetime.time(time.hours, time.minutes, 0), datetime.time(time.hours + 12, time.minutes, 0)]
+        return [datetime.time(time.hours if time.hours != 12 else 0, time.minutes, 0), datetime.time(time.hours + 12, time.minutes, 0)]
 
 
 def parse_alerts():
