@@ -1,3 +1,11 @@
+import argparse
+import re
+import datetime
+import sqlite3
+from .schema import Alert, NamedEntities, OrdinalSeries, NamedDate, NamedTime, Meridiem, RecognizedAlert
+
+NOW = datetime.datetime.now()
+
 def fake_ner(alert):
     return NamedEntities(
             times=extract_time(alert),
@@ -15,7 +23,7 @@ def extract_time(alert):
         hours = int(clean_value[:-2])
         minutes = int(clean_value[-2:])
         meridiem = Meridiem[ampm.upper()] if ampm else Meridiem.Ambiguous
-        entities.append(NamedTime(hours, minutes, meridiem))
+        entities.extend(expand_time(NamedTime(hours, minutes, meridiem)))
 
     return entities
 
@@ -46,27 +54,21 @@ def extract_date(alert):
             continue
 
         ordinal = OrdinalSeries[ordinal.upper()] if ordinal else OrdinalSeries.Ambiguous
-        entities.append(NamedDate(
+        entities.append(expand_date(NamedDate(
             month=int_month,
             day=int(day),
             ordinal=ordinal
-        ))
+        )))
 
     return entities
 
 
-def resolve_alert(alert):
-    for route in alert.routes:
-        for date in alert.entities.dates:
-            res_date = datetime.date(
-                    year=NOW.year if date.month >= (NOW.month - 1) else NOW.year + 1,
-                    month=date.month,
-                    day=date.day
-            )
-            for time in alert.entities.times:
-                res_times = expand_time(time)
-                for res_time in res_times:
-                    print('Guess', route, res_date, res_time)
+def expand_date(date):
+    return datetime.date(
+            year=NOW.year if date.month >= (NOW.month - 1) else NOW.year + 1,
+            month=date.month,
+            day=date.day
+    )
 
 
 def expand_time(time):
@@ -78,14 +80,39 @@ def expand_time(time):
         return [datetime.time(time.hours if time.hours != 12 else 0, time.minutes, 0), datetime.time(time.hours + 12, time.minutes, 0)]
 
 
-def parse_alert(alert):
-    return Alert(
-            status=alert['AlertStatus'],
-            routes=alert['Routes'],
-            start_date=alert['StartDateFormatted'],
-            title=alert['Title'],
-            entities=fake_ner(alert['Title']),
-            alert_id=alert['id']
-    )
+def expand_datetime(entities):
+    for date in entities.dates:
+        for time in entities.times:
+            yield datetime.datetime.combine(date, time)
+
+def recognize_alerts(db_file):
+    con = sqlite3.connect(db_file)
+    con.row_factory = Alert.fromsql
+    alerts = []
+    for row in con.execute('SELECT * FROM alerts;'):
+        alerts.append(RecognizedAlert(
+            alert=row,
+            dt=list(expand_datetime(fake_ner(row.title)))
+        ))
+
+    return alerts
 
 
+def link_alerts(trips_by_route, service_date, alerts):
+    cancelled_trips = set()
+    for alert in alerts:
+        trips_for_route = trips_by_route.get(alert.alert.route_id)
+        if not trips_for_route or not alert.dt:
+            continue
+
+        for dt in alert.dt:
+            if dt.date() != service_date.date():
+                continue
+
+            for trip in trips_for_route:
+                scheduled_dep = datetime.datetime.combine(dt.date(), datetime.time.min) + datetime.timedelta(seconds=trip.first_departure)
+                print(scheduled_dep, dt)
+                if scheduled_dep == dt:
+                    cancelled_trips.add(trip.trip_id)
+
+    return cancelled_trips

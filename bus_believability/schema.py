@@ -1,3 +1,4 @@
+import datetime
 import dataclasses
 from dataclasses import dataclass
 from enum import Enum
@@ -77,9 +78,8 @@ class NamedDate:
 
 @dataclass
 class NamedEntities:
-    times: list[NamedTime]
-    dates: list[NamedDate]
-
+    times: list[datetime.time]
+    dates: list[datetime.date]
 
 @dataclass
 class Alert(SQLAdapter):
@@ -91,6 +91,11 @@ class Alert(SQLAdapter):
     first_seen: int  # Unix time
     last_seen: int  # Unix time
 
+
+@dataclass
+class RecognizedAlert:
+    alert: Alert
+    dt: list[datetime.datetime]
 
 class TripPrediction(str, Enum):
     # Scheduled to run; awaiting further information

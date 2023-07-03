@@ -7,6 +7,7 @@ import math
 import json
 from .schema import *
 from . import aggregate
+from . import alerts
 from typing import Optional
 from dataclasses import dataclass
 from functools import cached_property
@@ -22,21 +23,25 @@ def main():
     cmd = argparse.ArgumentParser(description='Predict likelihood of a trip running based on RT data')
     cmd.add_argument('--gtfs', help='Directory containing GTFS static feed', required=True)
     cmd.add_argument('--db', help='A SQLite database containing GTFS-RT observations', required=True)
+    cmd.add_argument('--alerts', help='A SQLite database containing BCTransit-proprietary alerts', required=True)
     cmd.add_argument('--date', help='Service date in yyyymmdd format', default=today)
 
     args = cmd.parse_args()
-    predictor = Predictor(args.gtfs, args.db, datetime.datetime.strptime(args.date, '%Y%m%d'))
+    predictor = Predictor(args.gtfs, args.db, args.alerts, datetime.datetime.strptime(args.date, '%Y%m%d'))
     predictor.update() 
-    print(json.dumps(predictor.get_departures('20', '1', '160376'), indent=2))
+    print(json.dumps(predictor.get_all_blocks(), indent=2))
+    #print(json.dumps(predictor.get_departures('20', '1', '160376'), indent=2))
 
 class Predictor:
-    def __init__(self, gtfs_path, db_path, service_date):
+    def __init__(self, gtfs_path, db_path, alerts_db_path, service_date):
+        self.service_date = service_date
         self.gtfs = gtfs_loader.load(gtfs_path)
         self.itineraries = aggregate.get_itineraries(self.gtfs)
         self.stop_index = aggregate.get_stop_index(self.gtfs, self.itineraries)
+        self.alerts = alerts.recognize_alerts(alerts_db_path)
+        self.cancelled_trips = alerts.link_alerts(self.trips_by_route, self.service_date, self.alerts)
         self.con = sqlite3.connect(db_path)
         self.con.row_factory = VehicleState.fromsql
-        self.service_date = service_date
         self.results = {}
 
     @cached_property
@@ -47,25 +52,29 @@ class Predictor:
                 in service_days.days_by_service.items() if days[today_index]}
 
     @cached_property
-    def trips_by_block(self):
-        trips_by_block = {}
+    def active_trips(self):
+        active_trips = []
         for trip in sorted(self.gtfs.trips.values(), key=lambda trip: trip.first_departure):
             if trip.service_id not in self.active_services:
-                continue
+                active_trips.append(trip)
 
+        return active_trips
+
+
+    @cached_property
+    def trips_by_block(self):
+        trips_by_block = {}
+        for trip in self.active_trips:
             trips_by_block.setdefault(trip.block_id, []).append(trip)
 
         return trips_by_block
 
 
     @cached_property
-    def trips_by_route_direction(self):
+    def trips_by_route(self):
         trips_by_route = {}
-        for trip in sorted(self.gtfs.trips.values(), key=lambda trip: trip.first_departure):
-            if trip.service_id not in self.active_services:
-                continue
-
-            trips_by_route.setdefault((trip.route.route_short_name, trip.direction_id), []).append(trip)
+        for trip in self.active_trips: 
+            trips_by_route.setdefault(trip.route.route_short_name, []).append(trip)
 
         return trips_by_route
 
@@ -91,7 +100,11 @@ class Predictor:
                 latest_event = (max(observations.values(), key=lambda event: event.stop_sequence) 
                                 if observations else None)
                 trip_predictor = TripPredictor(trip, self.service_date, latest_event)
-                block_status = self._predict_from_previous_trips(block_status, trip_predictor.live_status)
+                live_status = trip_predictor.live_status
+                if trip.trip_id in self.cancelled_trips:
+                    live_status = TripPrediction.CANCELLED
+
+                block_status = self._predict_from_previous_trips(block_status, live_status)
                 self.results[trip.trip_id] = trip_predictor.get_trip_desc(now, block_status) 
 
     def get_all_blocks(self):
