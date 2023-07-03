@@ -7,7 +7,7 @@ from ..schema import Alert, apply_schema
 
 
 ALERT_URL = 'https://www.bctransit.com/sites/REST/controller/ServiceAlert/get-alert-list?micrositeid=1520526315921&timezone=Canada/Pacific'
-REFRESH = 30
+REFRESH = 1800
 
 
 def main():
