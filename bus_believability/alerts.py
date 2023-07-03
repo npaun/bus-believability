@@ -111,7 +111,6 @@ def link_alerts(trips_by_route, service_date, alerts):
 
             for trip in trips_for_route:
                 scheduled_dep = datetime.datetime.combine(dt.date(), datetime.time.min) + datetime.timedelta(seconds=trip.first_departure)
-                print(scheduled_dep, dt)
                 if scheduled_dep == dt:
                     cancelled_trips.add(trip.trip_id)
 

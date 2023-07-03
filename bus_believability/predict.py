@@ -42,6 +42,7 @@ class Predictor:
         self.cancelled_trips = alerts.link_alerts(self.trips_by_route, self.service_date, self.alerts)
         self.con = sqlite3.connect(db_path)
         self.con.row_factory = VehicleState.fromsql
+        print(self.cancelled_trips)
         self.results = {}
 
     @cached_property
@@ -55,7 +56,7 @@ class Predictor:
     def active_trips(self):
         active_trips = []
         for trip in sorted(self.gtfs.trips.values(), key=lambda trip: trip.first_departure):
-            if trip.service_id not in self.active_services:
+            if trip.service_id in self.active_services:
                 active_trips.append(trip)
 
         return active_trips
@@ -99,12 +100,10 @@ class Predictor:
                 observations = trip_observations.get(trip.trip_id, {})
                 latest_event = (max(observations.values(), key=lambda event: event.stop_sequence) 
                                 if observations else None)
-                trip_predictor = TripPredictor(trip, self.service_date, latest_event)
-                live_status = trip_predictor.live_status
-                if trip.trip_id in self.cancelled_trips:
-                    live_status = TripPrediction.CANCELLED
+                trip_predictor = TripPredictor(trip, self.service_date, latest_event,
+                                               is_cancelled=trip.trip_id in self.cancelled_trips)
 
-                block_status = self._predict_from_previous_trips(block_status, live_status)
+                block_status = self._predict_from_previous_trips(block_status, trip_predictor.status(now))
                 self.results[trip.trip_id] = trip_predictor.get_trip_desc(now, block_status) 
 
     def get_all_blocks(self):
@@ -140,6 +139,8 @@ class Predictor:
             return TripPrediction.BLOCK_IN_SERVICE
         elif live_status in {TripPrediction.MISSED, TripPrediction.MISSING}:
             return TripPrediction.BLOCK_MISSED
+        elif live_status in {TripPrediction.CANCELLED}:
+            return TripPrediction.BLOCK_LIKELY_CANCELLED
         else:
             return block_status
 
@@ -148,6 +149,7 @@ class TripPredictor:
     trip: any
     service_date: datetime.date
     latest_event: Optional[VehicleState]
+    is_cancelled: bool
 
     @cached_property
     def scheduled_end(self):
@@ -161,6 +163,9 @@ class TripPredictor:
         return self.live_status(now) if self.latest_event else self.scheduled_status(now)
 
     def scheduled_status(self, now):
+        if self.is_cancelled:
+            return TripPrediction.CANCELLED
+
         delay = (now - self.scheduled_start).total_seconds()
         if delay < MISSING_THRESHOLD:
             return TripPrediction.SCHEDULED
@@ -170,6 +175,7 @@ class TripPredictor:
         return TripPrediction.MISSED
 
     def live_status(self, now): 
+
         start_seq = self.trip.first_stop_time.stop_sequence
         end_seq = self.trip.last_stop_time.stop_sequence
 
