@@ -1,10 +1,27 @@
 import dataclasses
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
+
+
+class SQLAdapter:
+    def astuple(self):
+        return dataclasses.astuple(self)
+
+    @classmethod
+    def asplaceholder(cls):
+        n_fields = len(dataclasses.fields(cls))
+        placeholders = ','.join('?'*n_fields)
+        return f'({placeholders})'
+
+    @classmethod
+    def fromsql(cls, cur, row):
+        row_dict = {k[0]: v for k, v in zip(cur.description, row)}
+        return cls(**row_dict)
 
 
 @dataclass
-class VehicleState:
+class VehicleState(SQLAdapter):
     # Identify trip
     start_date: str
     trip_id: str
@@ -16,7 +33,7 @@ class VehicleState:
     #  Position
     lat: float
     lon: float
-    speed: float # km/h
+    speed: float  # km/h
 
     # Current heading
     stop_sequence: int
@@ -29,19 +46,50 @@ class VehicleState:
     # Observation
     observed_at: int
 
-    def astuple(self):
-        return dataclasses.astuple(self)
 
-    @classmethod
-    def asplaceholder(cls):
-        n_fields = len(dataclasses.fields(cls))
-        placeholders = ','.join('?'*n_fields)
-        return f'({placeholders})'
+class Meridiem(Enum):
+    Ambiguous = -1
+    AM = 1
+    PM = 2
 
-    @staticmethod
-    def fromsql(cur, row):
-        row_dict = {k[0]: v for k, v in zip(cur.description, row)}
-        return VehicleState(**row_dict)
+
+class OrdinalSeries(Enum):
+    Ambiguous = -1
+    TH = 0
+    ST = 1
+    ND = 2
+    RD = 3
+
+
+@dataclass
+class NamedTime:
+    hours: int
+    minutes: int
+    ampm: Meridiem
+
+
+@dataclass
+class NamedDate:
+    month: int
+    day: int
+    ordinal: OrdinalSeries
+
+
+@dataclass
+class NamedEntities:
+    times: list[NamedTime]
+    dates: list[NamedDate]
+
+
+@dataclass
+class Alert(SQLAdapter):
+    alert_id: int
+    route_id: str
+    title: str  # The raw text
+    status: str
+    start_date: int  # Unix time
+    first_seen: int  # Unix time
+    last_seen: int  # Unix time
 
 
 class TripPrediction(str, Enum):
@@ -57,7 +105,7 @@ class TripPrediction(str, Enum):
     # Arrived at terminus
     ARRIVED = "ARRIVED"
 
-    # No information available, should be running 
+    # No information available, should be running
     MISSING = "MISSING"
 
     # Did not operate
@@ -69,7 +117,7 @@ class TripPrediction(str, Enum):
     # An earlier trip operated as scheduled
     BLOCK_IN_SERVICE = "BLOCK_IN_SERVICE"
 
-    # An earlier trip did not run 
+    # An earlier trip did not run
     BLOCK_MISSED = "BLOCK_MISSED"
 
     # An earlier trip was cancelled by agency
@@ -79,5 +127,6 @@ class TripPrediction(str, Enum):
     IGNORE_BLOCK = "IGNORE_BLOCK"
 
 
-
-
+def apply_schema(con):
+    with open(Path(__file__).parent / 'schema.sql') as fp:
+        con.executescript(fp.read())

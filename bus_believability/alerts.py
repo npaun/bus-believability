@@ -1,67 +1,9 @@
-from collections import Counter
-import re
-import pprint
-import requests
-from dataclasses import dataclass
-from enum import Enum
-import json
-import datetime
-from gtfs_loader.types import GTFSTime
-
-NOW = datetime.datetime.now()
-ALERT_URL = 'https://www.bctransit.com/sites/REST/controller/ServiceAlert/get-alert-list?micrositeid=1520526315921&timezone=Canada/Pacific'
-
-def fetch_alerts():
-    sess = requests.Session()
-    res = sess.get(ALERT_URL)
-    return res.json()
-
-
-class Meridiem(Enum):
-    Ambiguous = -1
-    AM = 1
-    PM = 2
-
-class OrdinalSeries(Enum):
-    Ambiguous = -1
-    TH = 0
-    ST = 1
-    ND = 2
-    RD = 3
-
-@dataclass
-class NamedTime:
-    hours: int
-    minutes: int
-    ampm: Meridiem
-
-@dataclass 
-class NamedDate:
-    month: int
-    day: int
-    ordinal: OrdinalSeries
-
-
-@dataclass
-class NamedEntities:
-    times: list[NamedTime]
-    dates: list[NamedDate]
-
-
-@dataclass
-class Alert:
-    status: str
-    routes: list[str]
-    start_date: str # FIXME: parse it
-    title: str # The raw text
-    entities: NamedEntities
-    alert_id: int
-
 def fake_ner(alert):
     return NamedEntities(
             times=extract_time(alert),
             dates=extract_date(alert),
     )
+
 
 def extract_time(alert):
     time_strs = re.findall('((\d:?\d:?\d\d?) *(am|pm)?)', alert)
@@ -76,6 +18,7 @@ def extract_time(alert):
         entities.append(NamedTime(hours, minutes, meridiem))
 
     return entities
+
 
 MONTHS = {
         'JAN': 1,
@@ -111,15 +54,6 @@ def extract_date(alert):
 
     return entities
 
-def parse_alert(alert):
-    return Alert(
-            status=alert['AlertStatus'],
-            routes=alert['Routes'],
-            start_date=alert['StartDateFormatted'],
-            title=alert['Title'],
-            entities=fake_ner(alert['Title']),
-            alert_id=alert['id']
-    )
 
 def resolve_alert(alert):
     for route in alert.routes:
@@ -144,15 +78,14 @@ def expand_time(time):
         return [datetime.time(time.hours if time.hours != 12 else 0, time.minutes, 0), datetime.time(time.hours + 12, time.minutes, 0)]
 
 
-def parse_alerts():
-    #alerts = fetch_alerts()
-    with open('alerts.json') as fp:
-        alerts = json.load(fp)
+def parse_alert(alert):
+    return Alert(
+            status=alert['AlertStatus'],
+            routes=alert['Routes'],
+            start_date=alert['StartDateFormatted'],
+            title=alert['Title'],
+            entities=fake_ner(alert['Title']),
+            alert_id=alert['id']
+    )
 
-    for raw_alert in alerts:
-        alert = parse_alert(raw_alert)
-        resolve_alert(alert)
 
-
-if __name__ == '__main__':
-    parse_alerts()

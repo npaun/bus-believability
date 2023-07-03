@@ -11,4 +11,4 @@ RUN pypy3 -m ensurepip
 COPY --chown=1001:1001 requirements.txt .
 RUN pypy3 -m pip install -r requirements.txt
 COPY --chown=1001:1001 . .
-CMD ["pypy3", "-u", "-m", "bus_believability.observer", "--dir", "db/", "--bucket", "gs://bus-believability-data/wkt/"]
+CMD ["pypy3", "-u", "-m", "bus_believability.track.vehicles", "--dir", "db/", "--bucket", "gs://bus-believability-data/wkt/"]
