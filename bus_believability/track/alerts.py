@@ -25,10 +25,10 @@ def track_alerts(db_file):
     while True:
         try:
             process_alerts(sess, con)
-            time.sleep(REFRESH)
         except Exception as exc:
             print(exc)
-
+    
+        time.sleep(REFRESH)
 
 def fetch_alerts(sess):
     res = sess.get(ALERT_URL)
