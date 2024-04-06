@@ -43,10 +43,8 @@ def update_vehicle_positions(sess, con, url=VEHICLE_UPDATES_URL):
         cur.execute(f"""
         INSERT INTO vehicle_updates
         VALUES {vs.asplaceholder()}
-        ON CONFLICT (start_date, trip_id, stop_sequence)
+        ON CONFLICT (start_date, trip_id, stop_sequence, lat, lon)
         DO UPDATE SET
-            lat=excluded.lat,
-            lon=excluded.lon,
             speed=excluded.speed,
             vehicle_status=excluded.vehicle_status,
             observed_at=excluded.observed_at;
